@@ -1,0 +1,260 @@
+#!/usr/bin/python3
+
+import paho.mqtt.client as mqtt
+import subprocess
+import traceback
+import websocket
+import logging
+import base64
+import socket
+import ctypes
+import struct
+import time
+import json
+import sys
+import os
+
+
+MQTT_ADDR = '127.0.0.1'
+MQTT_PORT = 1883
+SSDP_ADDR = '239.255.255.250'
+SSDP_PORT = 1900
+
+libc = ctypes.CDLL('libc.so.6')
+hosts = dict()
+interval = 15
+
+
+def uptime():
+    if hasattr(time, 'perf_counter'):
+        return time.perf_counter()
+    elif hasattr(time, 'monotonic'):
+        return time.monotonic()
+    else:
+        buf = ctypes.create_string_buffer(4096)
+
+        if libc.sysinfo(buf) != 0:
+            return -1
+
+        return struct.unpack_from('@l', buf.raw)[0]
+
+
+def getaddrbymac(mac):
+    mac = mac.lower()
+    if ':' not in mac:
+        mac = ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+
+    with open('/proc/net/arp') as f:
+        f.readline()
+        for rec in f:
+            rec = rec.split()
+            if len(rec) > 3 and rec[3].lower() == mac:
+                return rec[0].lower()
+
+    return None
+
+
+def getmacbyaddr(addr):
+    addr = addr.lower()
+    with open('/proc/net/arp') as f:
+        f.readline()
+        for rec in f:
+            rec = rec.split()
+            if len(rec) > 3 and rec[0].lower() == addr:
+                return rec[3].lower().replace(':', '')
+
+    return None
+
+
+def update_state(client, mac, state):
+    client.publish('samsungtv/%s/power/state' % (mac,), state)
+    logging.info('sent samsungtv/%s/power/state %s', mac, state)
+
+
+def check_hosts(client):
+    u = uptime()
+
+    for key, val in hosts.items():
+        if 'status' not in val:
+            continue
+
+        if val['status'] == 0 and \
+            val['lastseen'] > 0 and \
+            val['lastseen'] + interval * 2 >= u:
+            update_state(client, key, 'ON')
+            hosts[key]['status'] = 1
+
+        elif val['status'] == 1 and \
+            (val['lastseen'] == -1 or \
+             val['lastseen'] + interval * 2 < u):
+            update_state(client, key, 'OFF')
+            hosts[key]['status'] = 0
+
+
+def mqtt_received(client, userdata, message):
+    logging.info('recv %s %s', message.topic, message.payload.decode('utf-8'))
+
+    try:
+        topic = message.topic.split('/')
+        assert topic[-1] == 'set', 'unsubscribed topic'
+        assert topic[-2] == 'power', 'unsubscribed topic'
+        mac = topic[-3].lower()
+    except Exception:
+        return
+
+    if len(mac) != 12:
+        return
+
+    if mac in hosts:
+        addr = hosts[mac]['addr']
+    else:
+        addr = getaddrbymac(mac)
+
+    if message.payload not in (b'ON', b'OFF'):
+        return
+
+    if message.payload == b'ON' and addr is None:
+        arg = ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+        subprocess.call(['ether-wake', arg])
+        return
+
+    try:
+        name = base64.b64encode(b'samsungctl').decode('utf-8')
+        url = 'ws://{}:{}/api/v2/channels/samsung.remote.control?name={}'.format(addr, 8001, name)
+        conn = websocket.create_connection(url, 3)
+        resp = json.loads(conn.recv())
+
+        if resp['event'] != 'ms.channel.connect':
+            conn.close()
+            logging.error('failed to send KEY_POWER: %s', resp['event'])
+            raise Exception
+
+        payload = json.dumps({
+            'method': 'ms.remote.control',
+            'params': {
+                'Cmd': 'Click',
+                'DataOfCmd': 'KEY_POWER',
+                'Option': 'false',
+                'TypeOfRemote': 'SendRemoteKey'
+            }
+        })
+
+        conn.send(payload)
+        conn.close()
+
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+
+        if message.payload == b'ON':
+            arg = ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+            subprocess.call(['ether-wake', arg])
+        else:
+            update_state(client, mac, 'ON')
+
+
+def datagram_received(data, addr):
+    addr, port = addr
+
+    try:
+        header, payload = data.decode().split('\r\n\r\n')[:2]
+        lines = header.split('\r\n')
+        cmd = lines[0].split()
+
+        lines = map(lambda x: x.replace(': ', ':', 1), lines[1:])
+        lines = filter(lambda x: len(x) > 0, lines)
+
+        headers = [x.split(':', 1) for x in lines]
+        headers = dict(map(lambda x: (x[0].lower(), x[1]), headers))
+
+    except Exception:
+        return
+
+    if cmd[0] not in ('NOTIFY', 'HTTP/1.1', 'HTTP/1.0'):
+        return
+
+    mac = None
+    for key, val in hosts.items():
+        if 'addr' in val and val['addr'] == addr:
+            mac = key
+            break
+
+    if mac is None:
+        mac = getmacbyaddr(addr)
+
+    if mac is None:
+        # datagram received in p2p tunnel without hardware address ?
+        return
+
+    if mac not in hosts:
+        hosts[mac] = {
+            'addr': addr,
+            'lastseen': -1,
+            'status': 0
+        }
+
+    if cmd[0] == 'NOTIFY':
+        if 'nts' not in headers:
+            return
+        if headers['nts'] == 'ssdp:alive':
+            hosts[mac]['lastseen'] = uptime()
+        elif headers['nts'] == 'ssdp:byebye':
+            hosts[mac]['lastseen'] = -1
+    else:
+        if len(cmd) > 1 and cmd[1] == '200':
+            hosts[mac]['lastseen'] = uptime()
+
+
+def main():
+    # setup ssdp socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    addr = socket.inet_aton(SSDP_ADDR)
+    iface = socket.inet_aton('0.0.0.0')
+    cmd = socket.IP_ADD_MEMBERSHIP
+    sock.setsockopt(socket.IPPROTO_IP, cmd, addr + iface)
+    sock.bind(('0.0.0.0', SSDP_PORT))
+    sock.settimeout(interval / 3.0)
+
+    msearch = b'M-SEARCH * HTTP/1.1\r\n' \
+              b'HOST: %s:%d\r\n' \
+              b'ST: upnp:rootdevice\r\n' \
+              b'MX: 2\r\n' \
+              b'MAN: "ssdp:discover"\r\n' \
+              b'\r\n' % (SSDP_ADDR.encode('utf-8'), SSDP_PORT)
+
+    # setup mqtt client
+    client = mqtt.Client('samsungctl')
+    client.on_message = mqtt_received
+    client.connect(MQTT_ADDR, port=MQTT_PORT)
+    client.loop_start()
+
+    client.subscribe('samsungtv/+/power/set')
+
+    sent = uptime()
+    sock.sendto(msearch, (SSDP_ADDR, SSDP_PORT))
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            datagram_received(data, addr)
+            check_hosts(client)
+        except socket.timeout:
+            pass
+
+        if uptime() >= sent + interval:
+            sent = uptime()
+            sock.sendto(msearch, (SSDP_ADDR, SSDP_PORT))
+
+    client.loop_stop()
+
+
+if __name__ == '__main__':
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+                        format='%(asctime)s %(levelname)s %(message)s')
+
+    if os.getenv('MQTT_ADDR') is not None:
+        MQTT_ADDR = os.getenv('MQTT_ADDR')
+
+    if os.getenv('MQTT_PORT') is not None:
+        MQTT_PORT = int(os.getenv('MQTT_PORT'))
+
+    main()
