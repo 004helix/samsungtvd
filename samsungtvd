@@ -94,6 +94,13 @@ def check_hosts(client):
 def mqtt_received(client, userdata, message):
     logging.info('recv %s %s', message.topic, message.payload.decode('utf-8'))
 
+    if message.topic == 'samsungtv/update':
+        for key, val in hosts.items():
+            if 'status' in val:
+                state = 'OFF' if val['status'] == 0 else 'ON'
+                update_state(client, key, state)
+        return
+
     try:
         topic = message.topic.split('/')
         assert topic[-1] == 'set', 'unsubscribed topic'
@@ -228,6 +235,7 @@ def main():
     client.connect(MQTT_ADDR, port=MQTT_PORT)
     client.loop_start()
 
+    client.subscribe('samsungtv/update')
     client.subscribe('samsungtv/+/power/set')
 
     sent = uptime()
