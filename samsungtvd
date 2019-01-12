@@ -15,7 +15,7 @@ import sys
 import os
 
 
-MQTT_ADDR = '127.0.0.1'
+MQTT_ADDR = 'mosquitto'
 MQTT_PORT = 1883
 SSDP_ADDR = '239.255.255.250'
 SSDP_PORT = 1900
