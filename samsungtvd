@@ -11,6 +11,7 @@ import ctypes
 import struct
 import time
 import json
+import ssl
 import sys
 import os
 
@@ -126,15 +127,30 @@ def mqtt_received(client, userdata, message):
         return
 
     try:
+        with open('tokens.json') as f:
+            tokens = json.load(f)
+    except Exception:
+        tokens = dict()
+
+    try:
         name = base64.b64encode(b'samsungctl').decode('utf-8')
-        url = 'ws://{}:{}/api/v2/channels/samsung.remote.control?name={}'.format(addr, 8001, name)
-        conn = websocket.create_connection(url, 3)
+        url = 'wss://{}:{}/api/v2/channels/samsung.remote.control?name={}'.format(addr, 8002, name)
+        if mac in tokens:
+            url += '&token=' + tokens[mac]
+
+        conn = websocket.create_connection(url, 3, sslopt={"cert_reqs": ssl.CERT_NONE})
         resp = json.loads(conn.recv())
 
         if resp['event'] != 'ms.channel.connect':
             conn.close()
             logging.error('failed to send KEY_POWER: %s', resp['event'])
             raise Exception
+
+        if 'token' in resp['data']:
+            if mac not in tokens or resp['data']['token'] != tokens[mac]:
+                tokens[mac] = resp['data']['token']
+                with open('tokens.json', 'w') as f:
+                    json.dump(tokens, f)
 
         payload = json.dumps({
             'method': 'ms.remote.control',
