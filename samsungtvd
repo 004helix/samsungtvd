@@ -171,8 +171,6 @@ def mqtt_received(client, userdata, message):
         if message.payload == b'ON':
             arg = ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
             subprocess.call(['ether-wake', arg])
-        else:
-            update_state(client, mac, 'ON')
 
 
 def datagram_received(data, addr):
