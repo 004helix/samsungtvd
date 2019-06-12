@@ -68,8 +68,8 @@ def getmacbyaddr(addr):
 
 
 def update_state(client, mac, state):
-    client.publish('samsungtv/%s/power/state' % (mac,), state)
-    logging.info('sent samsungtv/%s/power/state %s', mac, state)
+    client.publish('samsungtv/%s/power' % (mac,), state)
+    logging.info('sent samsungtv/%s/power %s', mac, state)
 
 
 def check_hosts(client):
