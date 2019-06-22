@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import paho.mqtt.client as mqtt
+from paho.mqtt.client import Client as MqttClient
 import subprocess
 import traceback
 import websocket
@@ -16,7 +16,7 @@ import sys
 import os
 
 
-MQTT_ADDR = 'mosquitto'
+MQTT_HOST = 'mosquitto'
 MQTT_PORT = 1883
 SSDP_ADDR = '239.255.255.250'
 SSDP_PORT = 1900
@@ -67,12 +67,12 @@ def getmacbyaddr(addr):
     return None
 
 
-def update_state(client, mac, state):
-    client.publish('samsungtv/%s/power' % (mac,), state)
+def update_state(mqtt, mac, state):
+    mqtt.publish('samsungtv/%s/power' % (mac,), state, retain=True)
     logging.info('sent samsungtv/%s/power %s', mac, state)
 
 
-def check_hosts(client):
+def check_hosts(mqtt):
     u = uptime()
 
     for key, val in hosts.items():
@@ -82,25 +82,18 @@ def check_hosts(client):
         if val['status'] == 0 and \
             val['lastseen'] > 0 and \
             val['lastseen'] + interval * 2 >= u:
-            update_state(client, key, 'ON')
+            update_state(mqtt, key, 'ON')
             hosts[key]['status'] = 1
 
         elif val['status'] == 1 and \
             (val['lastseen'] == -1 or \
              val['lastseen'] + interval * 2 < u):
-            update_state(client, key, 'OFF')
+            update_state(mqtt, key, 'OFF')
             hosts[key]['status'] = 0
 
 
-def mqtt_received(client, userdata, message):
+def mqtt_received(mqtt, userdata, message):
     logging.info('recv %s %s', message.topic, message.payload.decode('utf-8'))
-
-    if message.topic == 'samsungtv/update':
-        for key, val in hosts.items():
-            if 'status' in val:
-                state = 'OFF' if val['status'] == 0 else 'ON'
-                update_state(client, key, state)
-        return
 
     try:
         topic = message.topic.split('/')
@@ -244,13 +237,12 @@ def main():
               b'\r\n' % (SSDP_ADDR.encode('utf-8'), SSDP_PORT)
 
     # setup mqtt client
-    client = mqtt.Client('samsungctl')
-    client.on_message = mqtt_received
-    client.connect(MQTT_ADDR, port=MQTT_PORT)
-    client.loop_start()
+    mqtt = MqttClient('samsungctl')
+    mqtt.on_message = mqtt_received
+    mqtt.connect(MQTT_HOST, port=MQTT_PORT)
+    mqtt.loop_start()
 
-    client.subscribe('samsungtv/update')
-    client.subscribe('samsungtv/+/power/set')
+    mqtt.subscribe('samsungtv/+/power/set')
 
     sent = uptime()
     sock.sendto(msearch, (SSDP_ADDR, SSDP_PORT))
@@ -258,7 +250,7 @@ def main():
         try:
             data, addr = sock.recvfrom(1024)
             datagram_received(data, addr)
-            check_hosts(client)
+            check_hosts(mqtt)
         except socket.timeout:
             pass
 
@@ -266,15 +258,15 @@ def main():
             sent = uptime()
             sock.sendto(msearch, (SSDP_ADDR, SSDP_PORT))
 
-    client.loop_stop()
+    mqtt.loop_stop()
 
 
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
 
-    if os.getenv('MQTT_ADDR') is not None:
-        MQTT_ADDR = os.getenv('MQTT_ADDR')
+    if os.getenv('MQTT_HOST') is not None:
+        MQTT_HOST = os.getenv('MQTT_HOST')
 
     if os.getenv('MQTT_PORT') is not None:
         MQTT_PORT = int(os.getenv('MQTT_PORT'))
