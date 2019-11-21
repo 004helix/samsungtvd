@@ -9,6 +9,7 @@ import base64
 import socket
 import ctypes
 import struct
+import signal
 import time
 import json
 import ssl
@@ -38,6 +39,10 @@ def uptime():
             return -1
 
         return struct.unpack_from('@l', buf.raw)[0]
+
+
+def terminate(signum, frame):
+    sys.exit(0)
 
 
 def getaddrbymac(mac):
@@ -90,6 +95,11 @@ def check_hosts(mqtt):
              val['lastseen'] + interval * 2 < u):
             update_state(mqtt, key, 'OFF')
             hosts[key]['status'] = 0
+
+
+def mqtt_connected(mqtt, userdata, flags, rc):
+    if rc == 0:
+        mqtt.subscribe('samsungtv/+/power/set')
 
 
 def mqtt_received(mqtt, userdata, message):
@@ -239,10 +249,9 @@ def main():
     # setup mqtt client
     mqtt = MqttClient('samsungctl')
     mqtt.on_message = mqtt_received
-    mqtt.connect(MQTT_HOST, port=MQTT_PORT)
+    mqtt.on_connect = mqtt_connected
+    mqtt.connect_async(MQTT_HOST, port=MQTT_PORT)
     mqtt.loop_start()
-
-    mqtt.subscribe('samsungtv/+/power/set')
 
     sent = uptime()
     sock.sendto(msearch, (SSDP_ADDR, SSDP_PORT))
@@ -270,5 +279,10 @@ if __name__ == '__main__':
 
     if os.getenv('MQTT_PORT') is not None:
         MQTT_PORT = int(os.getenv('MQTT_PORT'))
+
+    if os.getpid() == 1:
+        signal.signal(signal.SIGINT, terminate)
+        signal.signal(signal.SIGTERM, terminate)
+        signal.signal(signal.SIGQUIT, terminate)
 
     main()
