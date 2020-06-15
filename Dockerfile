@@ -1,4 +1,4 @@
-FROM alpine:latest
+FROM alpine:3.11
 LABEL maintainer "Raman Shyshniou <rommer@ibuffed.com>"
 
 COPY . /opt
